@@ -1,22 +1,29 @@
 package com.hrily.pdfexample;
 
+import android.Manifest;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.pdf.PdfDocument;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.print.PrintAttributes;
 import android.print.pdf.PrintedPdfDocument;
+import android.support.v4.app.ActivityCompat;
+import android.support.v4.content.ContextCompat;
 import android.support.v4.content.FileProvider;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
 import android.view.View;
+import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 
 public class MainActivity extends AppCompatActivity {
+
+    static final int MY_PERMISSIONS_REQUEST_WRITE_STORAGE = 1;
 
     Runnable pdf;
 
@@ -84,6 +91,33 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btn).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
+                // Here, thisActivity is the current activity
+                if (ContextCompat.checkSelfPermission(MainActivity.this,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        != PackageManager.PERMISSION_GRANTED) {
+
+                    // Should we show an explanation?
+                    if (ActivityCompat.shouldShowRequestPermissionRationale(MainActivity.this,
+                            Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+
+                        // Show an explanation to the user *asynchronously* -- don't block
+                        // this thread waiting for the user's response! After the user
+                        // sees the explanation, try again to request the permission.
+
+                    } else {
+
+                        // No explanation needed, we can request the permission.
+
+                        ActivityCompat.requestPermissions(MainActivity.this,
+                                new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                                MY_PERMISSIONS_REQUEST_WRITE_STORAGE);
+
+                        // MY_PERMISSIONS_REQUEST_WRITE_STORAGE is an
+                        // app-defined int constant. The callback method gets the
+                        // result of the request.
+                    }
+                    return;
+                }
                 new Thread(pdf).start();
             }
         });
@@ -99,6 +133,34 @@ public class MainActivity extends AppCompatActivity {
         mShareIntent.putExtra(Intent.EXTRA_STREAM, uri);
         startActivity(mShareIntent);
         return;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+                                           String permissions[], int[] grantResults) {
+        switch (requestCode) {
+            case MY_PERMISSIONS_REQUEST_WRITE_STORAGE: {
+                // If request is cancelled, the result arrays are empty.
+                if (grantResults.length > 0
+                        && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+
+                    // permission was granted, yay! Do the
+                    // contacts-related task you need to do.
+
+                    new Thread(pdf).start();
+
+                } else {
+
+                    // permission denied, boo! Disable the
+                    // functionality that depends on this permission.
+                    Toast.makeText(this, "Permission required!", Toast.LENGTH_SHORT).show();
+                }
+                return;
+            }
+
+            // other 'case' lines to check for other
+            // permissions this app might request
+        }
     }
 
 }

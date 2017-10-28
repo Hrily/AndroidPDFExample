@@ -1,0 +1,495 @@
+/**************************
+     *     SYNCING METHODS
+     *************************/
+
+    /************************
+     *    CREATE IN CLOUD
+     ***********************/
+
+	/* Create Groups */
+    public JSONObject createGroups(JSONObject user) throws Exception{
+        return handleTokenRequest("groups/save", user);
+    }
+
+    /* Create Episodes */
+    public JSONObject createEpisodes(JSONObject user) throws Exception{
+        return handleTokenRequest("episodes/save", user);
+    }
+
+    /* Create Episodes */
+    public JSONObject createPersons(JSONObject user) throws Exception{
+        return handleTokenRequest("citizen/save", user);
+    }
+
+    /*************************
+     *     GET FROM CLOUD
+     ************************/
+
+	/* import my records */
+    public JSONObject importMyRecords(JSONObject user) throws Exception{
+        return handleTokenRequest("data/my_data", user);
+    }
+
+    /* import dummy records */
+    public JSONObject importDummyRecords(JSONObject user) throws Exception{
+        return handleTokenRequest("data/get_dummy", user);
+    }
+
+    /****************************
+     *     CONNECTOR METHODS
+     ***************************/
+
+    public void updateLastSuperSyncTime(){
+        long lastSync = System.currentTimeMillis();
+        EDITOR.putLong("LAST_SYNC", lastSync);
+        EDITOR.commit();
+    }
+
+    public JSONObject getPendingRecords(long userId) throws Exception{
+        // TODO: ask where can I get userId
+        List<Long> c = ModelService.CitizenModel().findAllID("created_by=? AND synch=?", new String[]{String.valueOf(userId),String.valueOf(0)});
+        List<Long> g =  ModelService.PersonGroupModel().findAllID("created_by=? AND synch=?", new String[]{String.valueOf(userId),String.valueOf(0)});
+        List<Long> e =  ModelService.EpisodeModel().findAllID("created_by=? AND guid=? AND status>?", new String[]{String.valueOf(userId),"",String.valueOf(0)});
+        JSONObject result = new JSONObject();
+        result.put("people",c);
+        result.put("groups",g);
+        result.put("cases", e);
+        return result;
+    }
+
+    public int getPendingRecordsCount(long userId){
+        int  cCount = ModelService.CitizenModel().getCount("created_by=? AND synch=?", new String[]{String.valueOf(userId),String.valueOf(0)});
+        int  gCount = ModelService.PersonGroupModel().getCount("created_by=? AND synch=?", new String[]{String.valueOf(userId),String.valueOf(0)});
+        int  eCount = ModelService.EpisodeModel().getCount("created_by=? AND guid=? AND status>?", new String[]{String.valueOf(userId),"",String.valueOf(0)});
+        return cCount+gCount+eCount;
+    }
+
+    public boolean connectionStatus(){
+        boolean status;
+        ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkInfo Info = cm.getActiveNetworkInfo();
+        if ((Info == null) || (!Info.isConnectedOrConnecting())) {
+            status = false;
+        } else {
+            status = true;
+        }
+        return status;
+    }
+
+    /******************
+     *     GROUPS
+     *****************/
+
+    public JSONObject getGroupToSync(String gid) throws Exception{
+        long id = Long.parseLong(gid);
+        PersonGroup personGroup = ModelService.PersonGroupModel().findById(ModelService.PersonGroupModel().getColumns(), id);
+        if( personGroup.getId() > 0 )
+        {
+            Location location = ModelService.LocationModel().findById(ModelService.LocationModel().getColumns(), personGroup.getLocation_id());
+            personGroup.setLocation(location);
+            List<PersonGroupAttributes> attributes = ModelService.PersonGroupAttributeModel().findAll(ModelService.PersonGroupAttributeModel().getColumns(), "group_id=?", new String[] {gid});
+            personGroup.setAttributes(attributes);
+        }
+        return new JSONObject(AppHelper.getGson().toJson(personGroup));
+    }
+
+    public JSONObject createGroupsInCloud(JSONObject data) throws Exception{
+        return createGroups(data);
+    }
+
+    public String verifyRequest(String params) throws Exception{
+        JSONObject paramObject = new JSONObject(params);
+        Response response = new Response();
+        response.setData(paramObject.getString("data"));
+        response.setSignature(paramObject.getString("signature"));
+        response.setIv(paramObject.getString("iv"));
+        response.setKey(paramObject.getString("key"));
+        String r = API.verifyResponse(response, context);
+        //mainActivity.dispayLog(r, "Decrepted Response");
+        return r;
+    }
+
+    public JSONObject updateGroupsFromApi(String params) throws Exception{
+        String data = verifyRequest(params);
+        JSONObject res = new JSONObject();
+        if( data != null )
+        {
+            JSONArray successItems = new JSONObject(data).getJSONArray("success_items");
+            long gId;
+            String groupGUId;
+            long lId;
+            String locationGUId;
+            JSONArray  success = new JSONArray();
+            JSONArray  failed = new JSONArray();
+            for(int i = 0; i < successItems.length() ; ++i)
+            {
+                gId = successItems.getJSONObject(i).getLong("id");
+                groupGUId = successItems.getJSONObject(i).getString("guid");
+                lId = successItems.getJSONObject(i).getLong("location_id");
+                locationGUId = successItems.getJSONObject(i).getString("location_guid");
+
+                ModelService.LocationModel().updateUID("guid", locationGUId, lId);
+                boolean status = ModelService.PersonGroupModel().updateUID("guid", groupGUId, gId);
+                ModelService.PersonGroupModel().updateSyncStatus(gId, 1);
+                if(status)
+                {
+                    success.put(gId);
+                }
+                else
+                {
+                    failed.put(gId);
+                }
+            }
+            res.put("success", success);
+            res.put("failed", failed);
+        }
+        return res;
+    }
+
+    public JSONObject syncGroups(String[] itemsToSync) throws Exception{
+        int syncErrorCode = 90;
+        int itemSyncIndex = 0;
+        JSONArray unsyncedGroups = new JSONArray();
+        for(String item: itemsToSync){
+            JSONObject group = getGroupToSync(item);
+            if(group.getInt("synch") == 0) {
+                unsyncedGroups.put(group);
+                itemSyncIndex++;
+            }
+        }
+        JSONObject response = new JSONObject();
+        response.put("status", 0);
+        response.put("code", 0);
+        JSONObject requestData = new JSONObject();
+        requestData.put("groups", unsyncedGroups);
+        JSONObject groupResponse = createGroupsInCloud(requestData);
+        if(groupResponse.getInt("status")==400){
+            int count = 0;
+            JSONObject updateResponse = updateGroupsFromApi(groupResponse.getString("response"));
+            if(updateResponse.getJSONObject("success") != null && updateResponse.getJSONObject("success").getInt("length")>0)
+                count = updateResponse.getJSONObject("success").getInt("length");
+            if(count>0)
+                response.put("status", count);
+            else
+                response.put("code", syncErrorCode);
+        }else {
+            response.put("code", groupResponse.getInt("status"));
+        }
+        return response;
+    }
+
+    /****************
+     *    PEOPLE
+     ***************/
+
+    public JSONObject getPersonToSync(String pid) throws Exception {
+        String[] columns = ModelService.CitizenModel().getColumns();
+
+        Citizen person = ModelService.CitizenModel().find( columns, "id=?", new String[]{pid});
+
+        List<EntityDocuments> documents = ModelService.EntityDocumentModel().findAll(ModelService.EntityDocumentModel().getColumns(), "object_id=?", new String[] {pid});
+
+        person.setDocuments(documents);
+
+        List<Wallet> payments = ModelService.WalletModel().findAll(ModelService.WalletModel().getColumns(), "person_id=? AND episode_id=?", new String[] {pid,String.valueOf(0)});
+
+        person.setPayments(payments);
+
+        Gson gson = AppHelper.getGson();
+        return new JSONObject(gson.toJson(person));
+    }
+
+    public String[] getGroupsByPerson(String person_id){
+        List<PersonGroup> personGroups = ModelService.PersonGroupMemberModel().getGroupsBYPerson(Long.parseLong(person_id));
+        List<String> personGroupIds = new ArrayList<>();
+        for(PersonGroup personGroup: personGroups){
+            if(!personGroup.getGuid().equals(""))
+                personGroupIds.add(personGroup.getGuid());
+        }
+        return (String[]) personGroupIds.toArray();
+    }
+
+    public JSONObject createPersonsInCloud(JSONObject requestData) throws Exception{
+        return createPersons(requestData);
+    }
+
+    public JSONObject updatePersonsFromApi(String params) throws Exception{
+        String data = verifyRequest(params);
+        JSONObject res = new JSONObject();
+
+        if( data != null )
+        {
+            JSONArray successItems = new JSONObject(data).getJSONArray("success_items");
+            long id;
+            String guid;
+
+            long person_id;
+            String person_guid;
+
+            long address_id;
+            String address_guid;
+
+            for(int i = 0; i < successItems.length() ; ++i)
+            {
+                id = successItems.getJSONObject(i).getLong("id");
+                guid = successItems.getJSONObject(i).getString("guid");
+
+                person_id = successItems.getJSONObject(i).getLong("person_id");
+                person_guid = successItems.getJSONObject(i).getString("person_guid");
+
+                address_id = successItems.getJSONObject(i).getLong("address_id");
+                address_guid = successItems.getJSONObject(i).getString("address_guid");
+
+                ModelService.PersonModel().updateUID("guid", person_guid, person_id);
+                ModelService.PersonAddressModel().updateUID("guid", address_guid, address_id);
+
+                ModelService.CitizenModel().updateUID("guid", guid, id);
+
+                ModelService.CitizenModel().updateSyncStatus(id, 1);
+            }
+
+            JSONArray payments = new JSONObject(data).getJSONArray("payments");
+
+            long payment_id;
+            String payment_guid;
+
+            for(int p = 0; p < payments.length() ; ++p)
+            {
+                payment_id = payments.getJSONObject(p).getLong("id");
+                payment_guid = payments.getJSONObject(p).getString("guid");
+                ModelService.WalletModel().updateUID("guid", payment_guid, payment_id);
+                ModelService.WalletModel().updateSyncStatus(payment_id, 1);
+            }
+
+            JSONArray edocuments = new JSONObject(data).getJSONArray("documents");
+
+            long document_id;
+            String document_guid;
+
+            for(int p = 0; p < edocuments.length() ; ++p)
+            {
+                document_id = edocuments.getJSONObject(p).getLong("id");
+                document_guid = edocuments.getJSONObject(p).getString("guid");
+                ModelService.EntityDocumentModel().updateUID("guid", document_guid, document_id);
+            }
+
+            if( successItems.length() > 0 )
+            {
+                res.put("status",true);
+                res.put("success",successItems);
+            }
+            else
+            {
+                res.put("status",false);
+                res.put("message",new JSONObject(data).getString("failed_messages"));
+            }
+        }
+        return res;
+    }
+
+    public JSONArray getEntitySchemesByStatus(String type, String id, String status)
+            throws Exception{
+        List<EntitySchemes> eSchemes = new ArrayList<EntitySchemes>();
+        eSchemes = ModelService.EntitySchemeModel().findAll(ModelService.EntitySchemeModel().getColumns(), "referral_id=? AND referral_type=? AND value>=?", new String[] {id,type,status});
+        Gson gson = AppHelper.getGson();
+        return new JSONArray(gson.toJson(eSchemes));
+    }
+
+    public JSONObject syncPersons(String[] itemsToSync) throws Exception{
+        int syncErrorCode = 90;
+        JSONArray persons = new JSONArray();
+        JSONArray pDocuments = new JSONArray();
+        JSONArray documents = new JSONArray();
+        for(String item: itemsToSync){
+            JSONObject person = getPersonToSync(item);
+            if(person.get("id")!=null && person.getInt("synch")==0){
+                String[] groups = getGroupsByPerson(person.getString("id"));
+                person.put("groups", groups);
+                JSONArray entitySchemes = getEntitySchemesByStatus("P", person.getString("id"), "1");
+                person.put("schemes", entitySchemes);
+                if(person.get("documents")!=null && person.getJSONArray("documents").length()>0){
+                    for(int i=0; i<person.getJSONArray("documents").length(); i++)
+                        pDocuments.put(person.getJSONArray("documents").get(i));
+                }
+                persons.put(person);
+            }
+        }
+        JSONObject response = new JSONObject("{status : 0, code : 0, message : ''}");
+        if(persons.length()>0){
+            JSONObject requestData = new JSONObject();
+            requestData.put("patients", persons);
+            JSONObject personResponse = createPersonsInCloud(requestData);
+            if(personResponse.getInt("status")==255){
+                JSONObject updateResponse = updatePersonsFromApi(personResponse.getString("response"));
+                if(updateResponse.get("status")!=null){
+                    JSONArray success = updateResponse.getJSONArray("success");
+                    for(int i=0; i<success.length(); i++){
+                        JSONObject s = success.getJSONObject(i);
+                        for(int j=0; j<pDocuments.length(); j++){
+                            JSONObject pD = pDocuments.getJSONObject(j);
+                            if(pD.getString("object_id").equals(s.getString("id"))){
+                                pDocuments.getJSONObject(j).put("object_guid", s.get("guid"));
+                                documents.put(pD);
+                            }
+                        }
+                    }
+                    if(documents.length()>0){
+                        int count = 0;
+                        // TODO: Ask wheres SynchService
+                        // SyncService.syncDocuments
+                        response.put("status", success.length());
+                    }else {
+                        response.put("status", success.length());
+                    }
+                }else {
+                    response.put("code", syncErrorCode);
+                    response.put("message", updateResponse.getString("message"));
+                }
+            }else {
+                response.put("code", requestData.get("status"));
+            }
+        }
+        return response;
+    }
+
+    /****************
+     *    EPISODE
+     ***************/
+
+    public JSONArray getUsers() throws Exception {
+        List<User> users = ModelService.UserModel().findAll(ModelService.UserModel().getColumns());
+
+        List<UserAttributes> userAttributes = new ArrayList<UserAttributes>();
+
+        for( int i = 0; i < users.size(); i++ )
+        {
+            userAttributes = ModelService.UserAttributeModel().findAll(ModelService.UserAttributeModel().getColumns(), "user_id=?", new String[] {String.valueOf(users.get(i).getId())});
+
+            users.get(i).setAttributes(userAttributes);
+        }
+
+        return new JSONArray(AppHelper.getGson().toJson(users));
+    }
+
+    public JSONObject getEpisodeToSync(String id) throws Exception {
+        String[] columns = ModelService.EpisodeModel().getColumns();
+
+        Episode episode =  ModelService.EpisodeModel().findById(columns, Long.parseLong(id));
+
+        List<Timeline> timeline = new ArrayList<Timeline>();
+
+        timeline = ModelService.TimelineModel().findAll(ModelService.TimelineModel().getColumns(), "object_id=?", new String[]{String.valueOf(episode.getId())});
+
+        episode.setTimeline(timeline);
+
+        List<Wallet> payments = new ArrayList<Wallet>();
+        payments = ModelService.WalletModel().findAll(ModelService.WalletModel().getColumns(), "episode_id=?", new String[] {String.valueOf(episode.getId())});
+
+        episode.setPayments(payments);
+
+        EpisodeForms episodeform = ModelService.EpisodeFormModel().find(ModelService.EpisodeFormModel().getColumns(), "episode_id=?", new String[]{id});
+
+        if( episodeform != null && episodeform.getId() > 0 )
+        {
+            episode.setForm_status(episodeform.getStatus());
+        }
+        else
+        {
+            episode.setForm_status(0);
+        }
+
+        List<EpisodeChecklist> checklists = new ArrayList<EpisodeChecklist>();
+        checklists = ModelService.EpisodeChecklistModel().findAll(ModelService.EpisodeChecklistModel().getColumns(), "episode_id=?", new String[] {String.valueOf(episode.getId())});
+
+        episode.setChecklists(checklists);
+
+        JSONObject episodeJSON = new JSONObject(AppHelper.getGson().toJson(episode));
+
+        if(episodeJSON.get("person")!=null)
+            episodeJSON.put("person", null);
+        if(episodeJSON.get("timeline")!=null && episodeJSON.getJSONArray("timeline").length()>0){
+            JSONArray users = getUsers();
+            for(int i=0; i<episodeJSON.getJSONArray("timeline").length(); i++){
+                JSONObject rt = episodeJSON.getJSONArray("timeline").getJSONObject(i);
+                rt.put("user", rt.get("created_by"));
+                String uGuid = "";
+                for(int j=0; j<users.length(); j++){
+                    JSONObject u = users.getJSONObject(i);
+                    if(rt.getString("created_by").equals(u.getString("username"))){
+                        uGuid = u.getString("guid");
+                    }
+                }
+                episodeJSON.getJSONArray("timeline").getJSONObject(i).put("created_by", uGuid);
+            }
+        }
+        return episodeJSON;
+    }
+
+    public JSONObject createEpisodesInCloud(JSONObject requestData) throws Exception {
+        return createEpisodes(requestData);
+    }
+
+    public JSONArray updateEpisodesFromApi(String params) throws Exception{
+        String data = verifyRequest(params);
+
+        JSONArray successItems = new JSONArray();
+        if( data != null )
+        {
+            successItems = new JSONObject(data).getJSONArray("success_items");
+
+            long id;
+            String guid;
+
+            for(int i = 0; i < successItems.length() ; ++i)
+            {
+                id = successItems.getJSONObject(i).getLong("id");
+                guid = successItems.getJSONObject(i).getString("guid");
+                ModelService.EpisodeModel().updateUID("guid", guid, id);
+            }
+
+            JSONArray payments = new JSONObject(data).getJSONArray("payments");
+
+            long payment_id;
+            String payment_guid;
+
+            for(int p = 0; p < payments.length() ; ++p)
+            {
+                payment_id = successItems.getJSONObject(p).getLong("id");
+                payment_guid = successItems.getJSONObject(p).getString("guid");
+                ModelService.WalletModel().updateUID("guid", payment_guid, payment_id);
+                ModelService.WalletModel().updateSyncStatus(payment_id, 1);
+            }
+        }
+
+        return successItems;
+    }
+
+    public JSONObject syncEpisodes(String[] itemsToSync) throws Exception {
+        int syncErrorCode = 90;
+        JSONArray episodes = new JSONArray();
+        for(String item: itemsToSync){
+            JSONObject episode = getEpisodeToSync(item);
+            if(episode.get("id")!=null && (episode.get("guid")==null || episode.getString("guid").equals("")))
+                episodes.put(episode);
+        }
+        JSONObject response = new JSONObject("{status: 0, code: 0}");
+        if(episodes.length()>0){
+            JSONObject requestData = new JSONObject();
+            requestData.put("episodes", episodes);
+            JSONObject createResponse = createEpisodesInCloud(requestData);
+            if(createResponse.getInt("status") == 504){
+                JSONArray updateResponse = updateEpisodesFromApi(data.getString("response"));
+                if(updateResponse!=null && updateResponse.length()>0)
+                    response.put("status", updateResponse.length());
+                else
+                    response.put("code", syncErrorCode);
+            }else {
+                response.put("code", createResponse.get("status"));
+            }
+        }
+        return response;
+    }
+
+    /*********************
+     *    PACKET SYNC
+     *********************/
